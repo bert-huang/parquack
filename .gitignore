@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+build/
+web-ext-artifacts/
+*.zip
+*.xpi
+
+# Logs / debug
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.eslintcache
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env / local
+.env
+.env.*
+!.env.example

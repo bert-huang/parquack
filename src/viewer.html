@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Parquack</title>
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="viewer.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <img src="icon.svg" alt="" class="brand-icon" />
+        Parquack
+      </div>
+      <div class="loaders">
+        <label class="btn">
+          <input type="file" id="file-input" accept=".parquet,.json,.csv,application/octet-stream,application/json,text/csv" hidden />
+          Open file…
+        </label>
+        <input type="text" id="url-input" placeholder="https://example.com/data.parquet" />
+        <button class="btn" id="url-load">Load URL</button>
+        <button class="btn" id="download" disabled title="Download the loaded file">Download</button>
+        <span class="status" id="status">Idle.</span>
+      </div>
+      <button class="icon-btn" id="settings-open" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path fill-rule="evenodd" clip-rule="evenodd" d="M11.078 2.25c-.917 0-1.699.663-1.85 1.567L9.05 4.889c-.02.12-.115.26-.297.348a7.493 7.493 0 00-.986.57c-.166.115-.334.126-.45.083L6.3 5.508a1.875 1.875 0 00-2.282.819l-.922 1.597a1.875 1.875 0 00.432 2.385l.84.692c.095.078.17.229.154.43a7.598 7.598 0 000 1.139c.015.2-.059.352-.153.43l-.841.692a1.875 1.875 0 00-.432 2.385l.922 1.597a1.875 1.875 0 002.282.818l1.019-.382c.115-.043.283-.031.45.082.312.214.641.405.985.57.182.088.277.228.297.35l.178 1.071c.151.904.933 1.567 1.85 1.567h1.844c.916 0 1.699-.663 1.85-1.567l.178-1.072c.02-.12.114-.26.297-.349.344-.165.673-.356.985-.57.167-.114.335-.125.45-.082l1.02.382a1.875 1.875 0 002.28-.819l.923-1.597a1.875 1.875 0 00-.432-2.385l-.84-.692c-.095-.078-.17-.229-.154-.43a7.614 7.614 0 000-1.139c-.016-.2.059-.352.153-.43l.84-.692c.708-.582.891-1.59.433-2.385l-.922-1.597a1.875 1.875 0 00-2.282-.818l-1.02.382c-.114.043-.282.031-.449-.083a7.49 7.49 0 00-.985-.57c-.183-.087-.277-.227-.297-.348l-.179-1.072a1.875 1.875 0 00-1.85-1.567h-1.843zM12 15.75a3.75 3.75 0 100-7.5 3.75 3.75 0 000 7.5z"/>
+        </svg>
+      </button>
+    </header>
+
+    <div class="modal" id="confirm-modal" hidden>
+      <div class="modal-backdrop" id="confirm-backdrop"></div>
+      <div class="modal-dialog modal-sm" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+        <header class="modal-header">
+          <h2 id="confirm-title">Confirm</h2>
+        </header>
+        <div class="modal-body">
+          <p class="confirm-message" id="confirm-message"></p>
+        </div>
+        <footer class="modal-footer">
+          <button class="btn" id="confirm-cancel">Cancel</button>
+          <button class="btn primary" id="confirm-ok">OK</button>
+        </footer>
+      </div>
+    </div>
+
+    <div class="modal" id="settings-modal" hidden>
+      <div class="modal-backdrop" id="settings-backdrop"></div>
+      <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <header class="modal-header">
+          <h2 id="settings-title">Settings</h2>
+          <button class="modal-close" id="settings-close" title="Close" aria-label="Close">×</button>
+        </header>
+        <div class="modal-body">
+          <section class="settings-section">
+            <h3>Theme</h3>
+            <p class="settings-hint">Switch between dark and light color schemes.</p>
+            <select id="theme-select">
+              <option value="dark">Dark</option>
+              <option value="light">Light</option>
+            </select>
+          </section>
+          <section class="settings-section">
+            <h3>Query page size</h3>
+            <p class="settings-hint">Number of rows fetched per page in the Query tab (100–10,000).</p>
+            <input type="text" inputmode="numeric" id="query-page-size-input" />
+          </section>
+          <section class="settings-section">
+            <h3>DuckDB rc</h3>
+            <p class="settings-hint">SQL run automatically after DuckDB initializes. Useful for <code>INSTALL</code>/<code>LOAD</code> extensions or <code>SET</code> options. Multiple statements separated by <code>;</code>.</p>
+            <div id="duckdbrc-editor" class="settings-editor"></div>
+          </section>
+        </div>
+        <footer class="modal-footer">
+          <span class="settings-credit">Crafted by Bert</span>
+          <button class="btn" id="settings-cancel">Cancel</button>
+          <button class="btn primary" id="settings-save">Save</button>
+        </footer>
+      </div>
+    </div>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="data">Data</button>
+      <button class="tab" data-tab="query">Query</button>
+      <button class="tab" data-tab="schema">Schema</button>
+      <button class="tab" data-tab="row-groups">Row Groups</button>
+      <button class="tab" data-tab="metadata">Metadata</button>
+      <button class="tab" data-tab="kv">KV Metadata</button>
+    </nav>
+
+    <main class="content">
+      <div class="tab-panel" data-panel="schema">
+        <div id="schema-grid" class="grid"></div>
+      </div>
+
+      <div class="tab-panel" data-panel="metadata">
+        <div id="file-meta-grid" class="grid"></div>
+      </div>
+
+      <div class="tab-panel" data-panel="row-groups">
+        <div class="rg-controls">
+          <label>
+            Row group
+            <select id="row-group-select" disabled></select>
+          </label>
+        </div>
+        <h3>Summary</h3>
+        <div id="row-groups-summary-grid" class="grid"></div>
+        <h3>Column chunks</h3>
+        <div id="row-groups-stats-grid" class="grid"></div>
+      </div>
+
+      <div class="tab-panel" data-panel="kv">
+        <div id="kv-grid" class="grid"></div>
+      </div>
+
+      <div class="tab-panel active" data-panel="data">
+        <div class="pager">
+          <button id="prev-page" class="btn pager-nav" disabled aria-label="Previous page">&lt;</button>
+          <button id="next-page" class="btn pager-nav" disabled aria-label="Next page">&gt;</button>
+          <span id="page-info"></span>
+          <label class="page-size">
+            Rows per page
+            <select id="page-size">
+              <option>50</option>
+              <option selected>100</option>
+              <option>250</option>
+              <option>500</option>
+              <option>1000</option>
+            </select>
+          </label>
+        </div>
+        <div id="data-grid" class="grid"></div>
+      </div>
+
+      <div class="tab-panel" data-panel="query">
+        <div class="query-main">
+          <div class="query-bar">
+            <div id="sql-editor"></div>
+            <div class="query-actions">
+              <button class="btn primary" id="run-query" disabled title="Initializing DuckDB…">Run (⌘/Ctrl+Enter)</button>
+              <span class="query-actions-spacer"></span>
+              <label class="query-export">
+                Export as
+                <select id="export-format">
+                  <option value="csv">CSV</option>
+                  <option value="json">JSON</option>
+                  <option value="parquet">Parquet</option>
+                </select>
+              </label>
+              <button class="btn" id="export-query" disabled title="Load a file first">Export</button>
+            </div>
+          </div>
+          <div class="pager" id="query-pager">
+            <button id="query-prev-page" class="btn pager-nav" disabled aria-label="Previous page">&lt;</button>
+            <button id="query-next-page" class="btn pager-nav" disabled aria-label="Next page">&gt;</button>
+            <span id="query-page-info"></span>
+          </div>
+          <div id="query-grid" class="grid"></div>
+        </div>
+        <aside class="query-history" id="query-history" aria-label="Query history">
+          <div class="qh-resize" id="qh-resize" title="Drag to resize"></div>
+          <div class="qh-header">
+            <span class="qh-title">Recent</span>
+            <button class="qh-clear" id="qh-clear" title="Clear all">Clear</button>
+            <button class="qh-toggle" id="qh-toggle" title="Collapse"></button>
+          </div>
+          <ul id="recent-queries"><li class="empty">No queries yet.</li></ul>
+          <button class="qh-rail" id="qh-rail" title="Expand">Recent</button>
+        </aside>
+      </div>
+    </main>
+
+    <script src="viewer.js"></script>
+  </body>
+</html>
