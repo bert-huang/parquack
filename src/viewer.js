@@ -3,7 +3,7 @@ import { basicSetup, EditorView } from "codemirror";
 import { keymap } from "@codemirror/view";
 import { Compartment, Prec } from "@codemirror/state";
 import { indentWithTab } from "@codemirror/commands";
-import { sql } from "@codemirror/lang-sql";
+import { sql, SQLDialect } from "@codemirror/lang-sql";
 import { oneDark } from "@codemirror/theme-one-dark";
 
 const runtime = (typeof browser !== "undefined" ? browser : chrome).runtime;
@@ -35,6 +35,8 @@ const els = {
   pageSize: document.getElementById("page-size"),
   sqlEditor: document.getElementById("sql-editor"),
   runQuery: document.getElementById("run-query"),
+  runQueryNew: document.getElementById("run-query-new"),
+  resultTabs: document.getElementById("result-tabs"),
   exportFormat: document.getElementById("export-format"),
   exportQuery: document.getElementById("export-query"),
   recentQueries: document.getElementById("recent-queries"),
@@ -74,11 +76,11 @@ const state = {
   editor: null,
   fileName: null,
   fileBuffer: null,
-  querySqlLast: null,
-  queryPage: 0,
   queryPageSize: 1000,
-  queryPageRows: 0,
-  queryTotalRows: null,
+  // Query result tabs. Each entry:
+  // { id, label, sql, page, pageRows, totalRows, table, error, isSelect, gen }
+  results: [],
+  activeResultId: null,
 };
 
 // ---------- editors ----------
@@ -90,19 +92,141 @@ const state = {
 const sqlThemeCompartment = new Compartment();
 const rcThemeCompartment = new Compartment();
 
+// Language compartments so the SQL extension (dialect + schema completion)
+// can be swapped at runtime — after DuckDB introspection and file loads.
+const sqlLangCompartment = new Compartment();
+const rcLangCompartment = new Compartment();
+
+// Dialect built from duckdb_keywords()/duckdb_functions()/duckdb_types() once
+// DuckDB is up (and rebuilt after duckdbrc runs, since LOADed extensions
+// register new functions). Null until then — sql() falls back to StandardSQL.
+let sqlDialect = null;
+// Columns of the loaded file (from DESCRIBE), as completion options.
+let dataColumns = [];
+// function name (lowercase) -> overload signature strings, from
+// duckdb_functions(). Feeds detail/info on function completions.
+let fnSignatures = new Map();
+
+const SIG_MAX_OVERLOADS = 8;
+const SIG_DETAIL_MAX = 40;
+
+function buildSignatureMap(rows) {
+  const map = new Map();
+  for (const row of rows) {
+    const name = String(row.function_name).toLowerCase();
+    if (!IDENT_RE.test(name)) continue;
+    const names = Array.from(row.parameters ?? []).map(String);
+    const types = Array.from(row.parameter_types ?? []).map(String);
+    const params = names
+      .map((n, i) => (types[i] && types[i] !== "NULL" ? `${n} ${types[i]}` : n))
+      .join(", ");
+    const ret = row.return_type != null && String(row.return_type) !== "NULL"
+      ? ` → ${row.return_type}`
+      : "";
+    const sig = `(${params})${ret}`;
+    let list = map.get(name);
+    if (!list) map.set(name, (list = []));
+    if (!list.includes(sig)) list.push(sig);
+  }
+  return map;
+}
+
+function functionCompletionExtras(name) {
+  const sigs = fnSignatures.get(name);
+  if (!sigs || sigs.length === 0) return {};
+  // detail: first overload's parameter list, without return type, truncated.
+  const first = sigs[0].replace(/ → .*$/, "");
+  const detail = first.length > SIG_DETAIL_MAX ? first.slice(0, SIG_DETAIL_MAX - 1) + "…" : first;
+  const lines = sigs.slice(0, SIG_MAX_OVERLOADS).map((s) => name + s);
+  if (sigs.length > SIG_MAX_OVERLOADS) {
+    lines.push(`…and ${sigs.length - SIG_MAX_OVERLOADS} more overloads`);
+  }
+  const text = lines.join("\n");
+  return {
+    detail,
+    info: () => {
+      const d = document.createElement("div");
+      d.style.whiteSpace = "pre-line";
+      d.textContent = text;
+      return d;
+    },
+  };
+}
+
+function sqlLangExt() {
+  return sql({
+    ...(sqlDialect ? { dialect: sqlDialect } : {}),
+    schema: { data: dataColumns },
+    defaultTable: "data",
+    upperCaseKeywords: true,
+    // Dialect "builtin" words (our duckdb_functions() list) surface as type
+    // "variable"; relabel them as lowercase functions with signature hints.
+    // Keywords/types keep the upper-cased label. boost -1 mirrors lang-sql's
+    // defaultKeyword so schema columns always rank above catalog words.
+    keywordCompletion: (label, type) => {
+      if (type !== "variable") return { label, type, boost: -1 };
+      const name = label.toLowerCase();
+      return { label: name, type: "function", boost: -1, ...functionCompletionExtras(name) };
+    },
+  });
+}
+
+function applySqlLang() {
+  const ext = sqlLangExt();
+  if (state.editor) {
+    state.editor.dispatch({ effects: sqlLangCompartment.reconfigure(ext) });
+  }
+  if (rcEditor) {
+    rcEditor.dispatch({ effects: rcLangCompartment.reconfigure(ext) });
+  }
+}
+
+// Words with spaces or quoting requirements can't live in a space-separated
+// dialect spec string.
+const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+async function refreshCompletionDialect() {
+  if (!state.conn) return;
+  try {
+    const [kw, fns, types] = await Promise.all([
+      state.conn.query(`SELECT keyword_name FROM duckdb_keywords();`),
+      state.conn.query(
+        `SELECT function_name, parameters, parameter_types, return_type
+         FROM duckdb_functions();`,
+      ),
+      state.conn.query(`SELECT DISTINCT type_name FROM duckdb_types();`),
+    ]);
+    const words = (table, col) =>
+      arrowToRows(table)
+        .map((r) => String(r[col]))
+        .filter((w) => IDENT_RE.test(w))
+        .join(" ");
+    fnSignatures = buildSignatureMap(arrowToRows(fns));
+    sqlDialect = SQLDialect.define({
+      keywords: words(kw, "keyword_name"),
+      builtin: [...fnSignatures.keys()].join(" "),
+      types: words(types, "type_name"),
+    });
+    applySqlLang();
+  } catch (e) {
+    console.warn("completion dialect refresh failed:", e);
+  }
+}
+
 function initEditor() {
   state.editor = new EditorView({
     doc: "SELECT * FROM data LIMIT 100;",
     parent: els.sqlEditor,
     extensions: [
       basicSetup,
-      sql(),
+      sqlLangCompartment.of(sqlLangExt()),
       sqlThemeCompartment.of(editorThemeExt()),
       // Prec.highest ensures our Mod-Enter runs before defaultKeymap's
       // insertBlankLine binding (which basicSetup includes and would otherwise
       // win due to appearing earlier in the extension list).
       Prec.highest(keymap.of([
         { key: "Mod-Enter", run: () => { runUserQuery(); return true; } },
+        { key: "Shift-Mod-Enter", run: () => { runUserQuery(true); return true; } },
       ])),
       keymap.of([indentWithTab]),
       EditorView.theme({
@@ -146,8 +270,11 @@ async function initDuckDB() {
   state.db = db;
   state.conn = await db.connect();
   await applyDuckdbRc(loadDuckdbRc());
+  await refreshCompletionDialect();
   els.runQuery.disabled = false;
   els.runQuery.title = "Run (⌘/Ctrl+Enter)";
+  els.runQueryNew.disabled = false;
+  els.runQueryNew.title = "Run in a new result tab (⇧+⌘/Ctrl+Enter)";
   setStatus("DuckDB ready.", "ok");
 }
 
@@ -215,7 +342,7 @@ function ensureRcEditor() {
     parent: els.duckdbrcEditor,
     extensions: [
       basicSetup,
-      sql(),
+      rcLangCompartment.of(sqlLangExt()),
       rcThemeCompartment.of(editorThemeExt()),
       keymap.of([indentWithTab]),
       EditorView.theme({
@@ -271,6 +398,8 @@ async function saveSettings() {
 
   closeSettings();
   await applyDuckdbRc(text);
+  // rc may INSTALL/LOAD extensions that register new functions.
+  await refreshCompletionDialect();
 }
 
 // ---------- themed confirm dialog ----------
@@ -426,10 +555,15 @@ function resetFileState() {
   state.totalRows = 0;
   state.rowGroupId = null;
   state.page = 0;
+  if (dataColumns.length > 0) {
+    dataColumns = [];
+    applySqlLang();
+  }
+  // Old result tabs point at the previous file's data view — drop them.
+  clearQueryResults();
   setParquetOnlyTabs(true);
 
   els.download.disabled = true;
-  els.exportQuery.disabled = true;
   els.rowGroupSelect.disabled = true;
   els.rowGroupSelect.replaceChildren();
   els.prevPage.disabled = true;
@@ -446,7 +580,6 @@ function rememberFile(buffer, name) {
   state.fileBuffer = buffer;
   state.fileName = name;
   els.download.disabled = false;
-  els.exportQuery.disabled = false;
 }
 
 function downloadCurrent() {
@@ -491,6 +624,12 @@ async function onLoaded(label, size) {
 async function refreshSchema() {
   const r = await state.conn.query(`DESCRIBE SELECT * FROM data;`);
   renderTable(els.schemaGrid, r);
+  dataColumns = arrowToRows(r).map((row) => ({
+    label: String(row.column_name),
+    detail: String(row.column_type),
+    type: "property",
+  }));
+  applySqlLang();
 }
 
 async function refreshFileMetadata() {
@@ -605,14 +744,19 @@ const EXPORT_FORMATS = {
   parquet: { ext: "parquet", mime: "application/octet-stream", opts: "(FORMAT PARQUET)" },
 };
 
+// Exports the active result tab's query (its full result set, not the
+// visible page). Uses the exact SQL the tab was run with — the editor may
+// have changed since.
 async function exportQuery() {
-  const querySql = getSql().trim().replace(/;\s*$/, "");
+  const r = activeResult();
+  if (!r) return;
+  const querySql = r.sql.trim().replace(/;\s*$/, "");
   if (!querySql) return;
   const fmt = EXPORT_FORMATS[els.exportFormat.value];
   if (!fmt) return;
 
   const outName = `export.${fmt.ext}`;
-  const downloadName = `query-result.${fmt.ext}`;
+  const downloadName = `${r.label.toLowerCase().replace(/\s+/g, "-")}.${fmt.ext}`;
   setStatus(`Exporting query as ${fmt.ext.toUpperCase()}…`);
   try {
     try { await state.db.dropFile(outName); } catch (_) {}
@@ -636,97 +780,210 @@ async function exportQuery() {
 }
 
 let _queryCountGen = 0;
+let _resultSeq = 0;
 
-async function runUserQuery() {
-  const querySql = getSql().trim();
-  if (!querySql) return;
-  state.querySqlLast = querySql;
-  state.queryPage = 0;
-  state.queryTotalRows = null;
-  state.queryPageRows = 0;
-  const gen = ++_queryCountGen;
-  const ok = await runQueryPage();
-  if (ok) {
-    rememberQuery(querySql);
-    if (/^\s*(SELECT|WITH)\b/i.test(querySql)) fetchQueryTotal(querySql, gen);
+function activeResult() {
+  return state.results.find((r) => r.id === state.activeResultId) ?? null;
+}
+
+function renderResultTabs() {
+  hideQueryTooltip();
+  els.resultTabs.replaceChildren();
+  els.resultTabs.hidden = state.results.length === 0;
+  for (const r of state.results) {
+    const tab = document.createElement("button");
+    tab.className = "rtab" + (r.id === state.activeResultId ? " active" : "");
+    tab.addEventListener("mouseenter", () => showQueryTooltip(tab, r.sql, "below"));
+    tab.addEventListener("mouseleave", hideQueryTooltip);
+    const label = document.createElement("span");
+    label.className = "rtab-label";
+    label.textContent = r.label;
+    tab.appendChild(label);
+    const close = document.createElement("span");
+    close.className = "rtab-close";
+    close.textContent = "×";
+    close.title = "Close";
+    close.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closeResult(r.id);
+    });
+    tab.appendChild(close);
+    tab.addEventListener("click", () => activateResult(r.id));
+    els.resultTabs.appendChild(tab);
   }
 }
 
-async function fetchQueryTotal(querySql, gen) {
+// Loads the active result's SQL into the editor, so the editor always shows
+// the query behind the visible result. Overwrites in-progress edits — run
+// them (or run in a new tab) before switching away to keep them.
+function syncEditorToActive() {
+  const r = activeResult();
+  if (r && getSql() !== r.sql) setSql(r.sql);
+}
+
+function activateResult(id) {
+  if (state.activeResultId === id) return;
+  state.activeResultId = id;
+  renderResultTabs();
+  renderActiveResult();
+  syncEditorToActive();
+}
+
+function closeResult(id) {
+  const idx = state.results.findIndex((r) => r.id === id);
+  if (idx === -1) return;
+  state.results.splice(idx, 1);
+  if (state.activeResultId === id) {
+    const next = state.results[idx] ?? state.results[idx - 1] ?? null;
+    state.activeResultId = next ? next.id : null;
+    syncEditorToActive();
+  }
+  renderResultTabs();
+  renderActiveResult();
+}
+
+function clearQueryResults() {
+  state.results = [];
+  state.activeResultId = null;
+  renderResultTabs();
+  renderActiveResult();
+}
+
+// Re-renders the query grid and pager from the active result's cached state.
+// Tab switches replay the stored Arrow table — no re-query.
+function renderActiveResult() {
+  const r = activeResult();
+  clearCellSelection();
+  els.exportQuery.disabled = !r;
+  els.exportQuery.title = r
+    ? `Export the full result of ${r.label}`
+    : "Run a query first";
+  if (!r) {
+    els.queryGrid.replaceChildren();
+    els.queryPager.hidden = true;
+    return;
+  }
+  els.queryPager.hidden = false;
+  if (r.error) {
+    els.queryGrid.replaceChildren(emptyDiv(r.error));
+    els.queryPageInfo.textContent = "";
+    els.queryPrevPage.disabled = true;
+    els.queryNextPage.disabled = true;
+    return;
+  }
+  renderTable(els.queryGrid, r.table, {
+    rowOffset: r.isSelect ? r.page * state.queryPageSize + 1 : null,
+  });
+  if (r.isSelect) {
+    els.queryPrevPage.disabled = r.page === 0;
+    updateQueryPagerInfo(r);
+  } else {
+    els.queryPageInfo.textContent = "";
+    els.queryPrevPage.disabled = true;
+    els.queryNextPage.disabled = true;
+  }
+}
+
+async function runUserQuery(intoNewTab = false) {
+  const querySql = getSql().trim();
+  if (!querySql) return;
+  let r = intoNewTab ? null : activeResult();
+  if (!r) {
+    r = {
+      id: ++_resultSeq,
+      label: `Result ${_resultSeq}`,
+      sql: querySql,
+      page: 0,
+      pageRows: 0,
+      totalRows: null,
+      table: null,
+      error: null,
+      isSelect: false,
+      gen: 0,
+    };
+    state.results.push(r);
+    state.activeResultId = r.id;
+  } else {
+    r.sql = querySql;
+    r.page = 0;
+    r.pageRows = 0;
+    r.totalRows = null;
+    r.error = null;
+  }
+  r.gen = ++_queryCountGen;
+  renderResultTabs();
+  const ok = await runQueryPage(r);
+  if (ok) {
+    rememberQuery(querySql);
+    if (r.isSelect) fetchQueryTotal(r, r.gen);
+  }
+}
+
+async function fetchQueryTotal(r, gen) {
   try {
-    const r = await state.conn.query(
-      `SELECT count(*)::BIGINT AS n FROM (${querySql.replace(/;\s*$/, "")}) AS __parquack_result__;`,
+    const res = await state.conn.query(
+      `SELECT count(*)::BIGINT AS n FROM (${r.sql.replace(/;\s*$/, "")}) AS __parquack_result__;`,
     );
-    if (gen !== _queryCountGen) return;
-    const rows = arrowToRows(r);
-    state.queryTotalRows = Number(rows[0]?.n ?? 0);
-    updateQueryPagerInfo();
+    if (gen !== r.gen || !state.results.includes(r)) return;
+    const rows = arrowToRows(res);
+    r.totalRows = Number(rows[0]?.n ?? 0);
+    if (state.activeResultId === r.id && r.isSelect && !r.error) {
+      updateQueryPagerInfo(r);
+    }
   } catch {}
 }
 
-function updateQueryPagerInfo() {
-  const offset = state.queryPage * state.queryPageSize;
-  if (state.queryPageRows === 0) {
+function updateQueryPagerInfo(r) {
+  const offset = r.page * state.queryPageSize;
+  if (r.pageRows === 0) {
     els.queryPageInfo.textContent = "No rows";
     els.queryNextPage.disabled = true;
     return;
   }
-  const range = `${(offset + 1).toLocaleString()}–${(offset + state.queryPageRows).toLocaleString()}`;
-  if (state.queryTotalRows !== null) {
-    els.queryPageInfo.textContent = `${range} of ${state.queryTotalRows.toLocaleString()}`;
-    els.queryNextPage.disabled = offset + state.queryPageRows >= state.queryTotalRows;
+  const range = `${(offset + 1).toLocaleString()}–${(offset + r.pageRows).toLocaleString()}`;
+  if (r.totalRows !== null) {
+    els.queryPageInfo.textContent = `${range} of ${r.totalRows.toLocaleString()}`;
+    els.queryNextPage.disabled = offset + r.pageRows >= r.totalRows;
   } else {
     els.queryPageInfo.textContent = range;
     // Without a total, use heuristic: fewer rows than limit means last page
-    els.queryNextPage.disabled = state.queryPageRows < state.queryPageSize;
+    els.queryNextPage.disabled = r.pageRows < state.queryPageSize;
   }
 }
 
-async function runQueryPage() {
-  const querySql = state.querySqlLast;
+async function runQueryPage(r) {
+  const querySql = r.sql;
   if (!querySql) return false;
 
   // Only SELECT/WITH queries get wrapped in LIMIT/OFFSET. DDL, EXPLAIN, COPY
   // etc. are run as-is and their results shown without pagination.
   const isSelect = /^\s*(SELECT|WITH)\b/i.test(querySql);
+  r.isSelect = isSelect;
   const limit = state.queryPageSize;
-  const offset = state.queryPage * limit;
+  const offset = r.page * limit;
 
   setStatus("Running query…");
   try {
     const t0 = performance.now();
-    const r = isSelect
+    const table = isSelect
       ? await state.conn.query(
           `SELECT * FROM (${querySql.replace(/;\s*$/, "")}) AS __parquack_result__ LIMIT ${limit} OFFSET ${offset};`,
         )
       : await state.conn.query(querySql);
     const ms = performance.now() - t0;
 
-    clearCellSelection();
-    renderTable(els.queryGrid, r, { rowOffset: isSelect ? offset + 1 : null });
-
-    if (isSelect) {
-      state.queryPageRows = r.numRows;
-      els.queryPager.hidden = false;
-      els.queryPrevPage.disabled = state.queryPage === 0;
-      updateQueryPagerInfo();
-    } else {
-      els.queryPager.hidden = false;
-      els.queryPageInfo.textContent = "";
-      els.queryPrevPage.disabled = true;
-      els.queryNextPage.disabled = true;
-    }
-
-    setStatus(`Query OK — ${r.numRows.toLocaleString()} rows in ${formatMs(ms)}.`, "ok");
+    r.table = table;
+    r.error = null;
+    r.pageRows = isSelect ? table.numRows : 0;
+    if (state.activeResultId === r.id) renderActiveResult();
+    setStatus(`Query OK — ${table.numRows.toLocaleString()} rows in ${formatMs(ms)}.`, "ok");
     return true;
   } catch (e) {
     const friendly = friendlyQueryError(e.message);
+    r.error = friendly.body;
+    r.table = null;
     setStatus(friendly.status, "error");
-    els.queryGrid.replaceChildren(emptyDiv(friendly.body));
-    els.queryPager.hidden = false;
-    els.queryPageInfo.textContent = "";
-    els.queryPrevPage.disabled = true;
-    els.queryNextPage.disabled = true;
+    if (state.activeResultId === r.id) renderActiveResult();
     return false;
   }
 }
@@ -835,7 +1092,7 @@ function removeQuery(querySql) {
 
 let _qhTooltip = null;
 
-function showQueryTooltip(anchor, text) {
+function showQueryTooltip(anchor, text, placement = "left") {
   if (!_qhTooltip) {
     _qhTooltip = document.createElement("div");
     _qhTooltip.className = "qh-tooltip";
@@ -848,8 +1105,13 @@ function showQueryTooltip(anchor, text) {
   _qhTooltip.style.display = "block";
   const ar = anchor.getBoundingClientRect();
   const tr = _qhTooltip.getBoundingClientRect();
-  _qhTooltip.style.left = `${Math.max(8, ar.left - tr.width - 8)}px`;
-  _qhTooltip.style.top = `${Math.min(ar.top, window.innerHeight - tr.height - 8)}px`;
+  if (placement === "below") {
+    _qhTooltip.style.left = `${Math.max(8, Math.min(ar.left, window.innerWidth - tr.width - 8))}px`;
+    _qhTooltip.style.top = `${Math.min(ar.bottom + 6, window.innerHeight - tr.height - 8)}px`;
+  } else {
+    _qhTooltip.style.left = `${Math.max(8, ar.left - tr.width - 8)}px`;
+    _qhTooltip.style.top = `${Math.min(ar.top, window.innerHeight - tr.height - 8)}px`;
+  }
 }
 
 function hideQueryTooltip() {
@@ -1219,16 +1481,20 @@ function wireUI() {
   });
 
   els.queryPrevPage.addEventListener("click", async () => {
-    if (state.queryPage === 0) return;
-    state.queryPage -= 1;
-    await runQueryPage();
+    const r = activeResult();
+    if (!r || r.page === 0) return;
+    r.page -= 1;
+    await runQueryPage(r);
   });
   els.queryNextPage.addEventListener("click", async () => {
-    state.queryPage += 1;
-    await runQueryPage();
+    const r = activeResult();
+    if (!r) return;
+    r.page += 1;
+    await runQueryPage(r);
   });
 
-  els.runQuery.addEventListener("click", runUserQuery);
+  els.runQuery.addEventListener("click", () => runUserQuery());
+  els.runQueryNew.addEventListener("click", () => runUserQuery(true));
   els.exportQuery.addEventListener("click", exportQuery);
   els.qhToggle.addEventListener("click", toggleHistoryCollapsed);
   els.qhRail.addEventListener("click", () => {

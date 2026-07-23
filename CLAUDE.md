@@ -9,6 +9,7 @@ npm run watch               # watch + Firefox (sourcemaps, no minify)
 npm run package:firefox     # build + zip → build/firefox/parquack.zip
 npm run package             # both targets
 npm run run:firefox         # launch in Firefox via web-ext
+npm run run:chrome          # launch in Chrome/Chromium via web-ext
 ```
 
 ## Key conventions
@@ -45,4 +46,4 @@ Files are registered as `current.parquet` in an in-memory DuckDB instance regard
 
 ## UI state
 
-All mutable UI state lives in the `state` object at the top of `viewer.js`. Key fields: `loaded`, `fileType`, `page`, `totalRows`, `queryPage`, `queryTotalRows`, `queryPageRows`, `rowGroupId`.
+All mutable UI state lives in the `state` object at the top of `viewer.js`. Key fields: `loaded`, `fileType`, `page`, `totalRows`, `rowGroupId`, `results`, `activeResultId`. Query results are per-tab objects in `state.results` (`{ id, label, sql, page, pageRows, totalRows, table, error, isSelect, gen }`); the Arrow table is cached per tab so switching tabs re-renders without re-querying. SQL autocompletion state (dialect from `duckdb_keywords()`/`duckdb_functions()`/`duckdb_types()`, column completions from DESCRIBE, function signature map) lives in module-level `sqlDialect`/`dataColumns`/`fnSignatures`, applied to both editors via `Compartment.reconfigure`.

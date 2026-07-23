@@ -219,6 +219,45 @@ option {
   color: var(--muted);
 }
 
+/* Query result tabs — one per executed query, for side-by-side comparison. */
+.result-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding-bottom: 8px;
+}
+.rtab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 6px 4px 10px;
+  cursor: pointer;
+  max-width: 260px;
+}
+.rtab:hover { background: var(--panel-hover); color: var(--fg); }
+.rtab.active {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+.rtab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rtab-close {
+  color: var(--muted);
+  border-radius: 4px;
+  padding: 0 4px;
+  line-height: 1.2;
+}
+.rtab-close:hover { background: var(--panel); color: var(--fg); }
+
 .pager,
 .rg-controls {
   display: flex;

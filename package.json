@@ -1,6 +1,6 @@
 {
   "name": "parquack",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Browser extension for browsing Parquet files via DuckDB-WASM.",
   "type": "module",
@@ -13,7 +13,8 @@
     "package:firefox": "node build.mjs --target=firefox --package",
     "package:chrome": "node build.mjs --target=chrome --package",
     "package": "npm run package:firefox && npm run package:chrome",
-    "run:firefox": "web-ext run --source-dir=build/firefox --firefox=firefox"
+    "run:firefox": "web-ext run --source-dir=build/firefox --firefox=firefox",
+    "run:chrome": "web-ext run --source-dir=build/chrome --target=chromium"
   },
   "dependencies": {
     "@codemirror/commands": "6.10.3",

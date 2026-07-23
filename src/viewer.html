@@ -140,6 +140,7 @@
             <div id="sql-editor"></div>
             <div class="query-actions">
               <button class="btn primary" id="run-query" disabled title="Initializing DuckDB…">Run (⌘/Ctrl+Enter)</button>
+              <button class="btn" id="run-query-new" disabled title="Initializing DuckDB…">Run in new tab (⇧+⌘/Ctrl+Enter)</button>
               <span class="query-actions-spacer"></span>
               <label class="query-export">
                 Export as
@@ -149,10 +150,11 @@
                   <option value="parquet">Parquet</option>
                 </select>
               </label>
-              <button class="btn" id="export-query" disabled title="Load a file first">Export</button>
+              <button class="btn" id="export-query" disabled title="Run a query first">Export</button>
             </div>
           </div>
-          <div class="pager" id="query-pager">
+          <div class="result-tabs" id="result-tabs" hidden></div>
+          <div class="pager" id="query-pager" hidden>
             <button id="query-prev-page" class="btn pager-nav" disabled aria-label="Previous page">&lt;</button>
             <button id="query-next-page" class="btn pager-nav" disabled aria-label="Next page">&gt;</button>
             <span id="query-page-info"></span>

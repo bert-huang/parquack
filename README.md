@@ -8,6 +8,8 @@ A Firefox and Chrome extension for viewing and querying Parquet, JSON, and CSV f
 - Auto-intercepts `.parquet` URL navigations and opens them in the viewer
 - Browse data with pagination and configurable page size
 - Run arbitrary SQL queries with a CodeMirror editor (syntax highlighting, query history)
+- SQL autocompletion: columns of the loaded file, plus DuckDB keywords, types, and functions with signature hints (including functions registered by extensions loaded via `duckdbrc`)
+- Multiple query result tabs — "Run in new tab" (⇧+⌘/Ctrl+Enter) keeps previous results around for side-by-side comparison
 - Export query results as CSV, JSON, or Parquet
 - Inspect schema, file metadata, row group statistics, and key-value metadata
 - Dark/light theme, configurable query page size, and a `duckdbrc` startup SQL field
@@ -49,12 +51,13 @@ npm run watch              # Firefox
 npm run watch:chrome
 ```
 
-### Run in Firefox
+### Run in a browser
 
 Requires [web-ext](https://github.com/mozilla/web-ext) (included as a dev dependency):
 
 ```sh
 npm run run:firefox
+npm run run:chrome         # uses the default Chrome/Chromium install; override with --chromium-binary
 ```
 
 ### Package for distribution
