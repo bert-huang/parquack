@@ -9,7 +9,12 @@ import { oneDark } from "@codemirror/theme-one-dark";
 const runtime = (typeof browser !== "undefined" ? browser : chrome).runtime;
 const url = (p) => runtime.getURL(p);
 
-const FILE_NAME = "current.parquet";
+// Each load registers under a fresh name (current-1.parquet, current-2.parquet,
+// …). Reusing one name corrupts reads: DuckDB ≥1.3's external file cache keys
+// cached parquet blocks by path, so a second file registered under the same
+// path gets served the first file's pages ("ZSTD Decompression failure").
+let _fileSeq = 0;
+let registeredName = null;
 
 const els = {
   status: document.getElementById("status"),
@@ -269,6 +274,10 @@ async function initDuckDB() {
   await db.instantiate(mainModule);
   state.db = db;
   state.conn = await db.connect();
+  // Registered file buffers already live in memory — DuckDB ≥1.3's external
+  // file cache would only duplicate them. Guarded: setting may not exist in
+  // other core versions. duckdbrc (below) can still override.
+  try { await state.conn.query("SET enable_external_file_cache=false;"); } catch (_) {}
   await applyDuckdbRc(loadDuckdbRc());
   await refreshCompletionDialect();
   els.runQuery.disabled = false;
@@ -454,15 +463,19 @@ function detectFileType(name) {
 async function registerBuffer(buf, type = "parquet") {
   if (!state.db || !state.conn) throw new Error("DuckDB is not ready yet.");
   const db = state.db;
-  try { await db.dropFile(FILE_NAME); } catch (_) {}
-  await db.registerFileBuffer(FILE_NAME, new Uint8Array(buf));
+  const name = `current-${++_fileSeq}.parquet`;
+  await db.registerFileBuffer(name, new Uint8Array(buf));
   const reader =
-    type === "json" ? `read_json_auto('${FILE_NAME}')` :
-    type === "csv"  ? `read_csv_auto('${FILE_NAME}')` :
-                     `read_parquet('${FILE_NAME}')`;
+    type === "json" ? `read_json_auto('${name}')` :
+    type === "csv"  ? `read_csv_auto('${name}')` :
+                     `read_parquet('${name}')`;
   await state.conn.query(
     `CREATE OR REPLACE VIEW data AS SELECT * FROM ${reader};`,
   );
+  if (registeredName) {
+    try { await db.dropFile(registeredName); } catch (_) {}
+  }
+  registeredName = name;
   state.loaded = true;
   state.fileType = type;
   state.page = 0;
@@ -548,6 +561,9 @@ function setParquetOnlyTabs(visible) {
 }
 
 function resetFileState() {
+  // Kill any in-flight query (e.g. a background COUNT from fetchQueryTotal)
+  // before the file swap — its results are for the outgoing file anyway.
+  if (state.conn) state.conn.cancelSent().catch(() => {});
   state.loaded = false;
   state.fileType = null;
   state.fileBuffer = null;
@@ -634,7 +650,7 @@ async function refreshSchema() {
 
 async function refreshFileMetadata() {
   const r = await state.conn.query(
-    `SELECT * FROM parquet_file_metadata('${FILE_NAME}');`,
+    `SELECT * FROM parquet_file_metadata('${registeredName}');`,
   );
   renderKeyValue(els.fileMetaGrid, r);
 }
@@ -642,7 +658,7 @@ async function refreshFileMetadata() {
 async function refreshRowGroupSelector() {
   const r = await state.conn.query(
     `SELECT DISTINCT row_group_id
-     FROM parquet_metadata('${FILE_NAME}')
+     FROM parquet_metadata('${registeredName}')
      ORDER BY row_group_id;`,
   );
   const ids = arrowToRows(r).map((r) => Number(r.row_group_id));
@@ -675,7 +691,7 @@ async function refreshRowGroupView() {
             sum(total_uncompressed_size)::BIGINT     AS uncompressed_bytes,
             round(100.0 * sum(total_compressed_size)
                   / nullif(sum(total_uncompressed_size), 0), 2) AS compression_pct
-     FROM parquet_metadata('${FILE_NAME}')
+     FROM parquet_metadata('${registeredName}')
      WHERE row_group_id = ${id}
      GROUP BY row_group_id;`,
   );
@@ -693,7 +709,7 @@ async function refreshRowGroupView() {
             encodings,
             total_compressed_size                  AS compressed_bytes,
             total_uncompressed_size                AS uncompressed_bytes
-     FROM parquet_metadata('${FILE_NAME}')
+     FROM parquet_metadata('${registeredName}')
      WHERE row_group_id = ${id}
      ORDER BY column_id;`,
   );
@@ -705,7 +721,7 @@ async function refreshKvMetadata() {
     const r = await state.conn.query(
       `SELECT key::VARCHAR   AS key,
               value::VARCHAR AS value
-       FROM parquet_kv_metadata('${FILE_NAME}');`,
+       FROM parquet_kv_metadata('${registeredName}');`,
     );
     renderKvPairs(els.kvGrid, r);
   } catch (e) {
@@ -979,6 +995,10 @@ async function runQueryPage(r) {
     setStatus(`Query OK — ${table.numRows.toLocaleString()} rows in ${formatMs(ms)}.`, "ok");
     return true;
   } catch (e) {
+    // Superseded (tab closed / results cleared by a file load, possibly via
+    // cancelSent): swallow — the error belongs to a result nobody can see,
+    // and setStatus would stomp the newer load's status line.
+    if (!state.results.includes(r)) return false;
     const friendly = friendlyQueryError(e.message);
     r.error = friendly.body;
     r.table = null;
